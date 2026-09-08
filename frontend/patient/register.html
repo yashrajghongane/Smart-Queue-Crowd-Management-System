@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart Queue - Register</title>
+  <link rel="stylesheet" href="../shared/styles.css">
+</head>
+<body>
+  <div class="container" id="registration-container">
+    <h2>Join Queue</h2>
+    <div id="error-message" class="error hidden"></div>
+
+    <form id="register-form">
+      <div class="form-group">
+        <label for="name">Full Name</label>
+        <input type="text" id="name" required>
+      </div>
+
+      <div class="form-group">
+        <label for="dob">Date of Birth</label>
+        <input type="date" id="dob" required>
+      </div>
+
+      <div class="form-group">
+        <label for="mobile">Mobile Number</label>
+        <input type="tel" id="mobile" required pattern="[0-9]{10}">
+      </div>
+
+      <div class="form-group">
+        <label for="patient-type">Patient Type</label>
+        <select id="patient-type" required>
+          <option value="NEW">New</option>
+          <option value="FOLLOW_UP">Follow Up</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="department">Department</label>
+        <select id="department" required>
+          <option value="">Loading...</option>
+        </select>
+      </div>
+
+      <button type="submit" id="submit-btn">Join Queue</button>
+    </form>
+  </div>
+
+  <div class="container hidden" id="success-container">
+    <h2>Registration Successful</h2>
+    <div class="token-card">
+      <div id="success-dept">Department</div>
+      <div class="token-number" id="success-token">--</div>
+      <div>Room <span id="success-room">-</span></div>
+    </div>
+    <a id="status-link" href="#">
+      <button type="button">View Queue Status</button>
+    </a>
+  </div>
+
+  <script src="../shared/api.js"></script>
+  <script src="register.js"></script>
+</body>
+</html>

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart Queue - Patient Status</title>
+  <link rel="stylesheet" href="../shared/styles.css">
+  <style>
+    .status-card { text-align: center; font-size: 1.2rem; }
+    .status-serving { color: green; font-weight: bold; }
+    .status-waiting { color: orange; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <div class="container" id="status-container">
+    <h2>Queue Status</h2>
+    <div id="error-message" class="error hidden"></div>
+
+    <div class="token-card">
+      <div id="dept-name">--</div>
+      <div class="token-number" id="my-token">--</div>
+      <div>Room: <span id="room-name">-</span></div>
+      <div id="my-status" class="status-waiting">Loading...</div>
+    </div>
+
+    <div class="status-card">
+      <p>Now Serving: <strong id="current-token">--</strong></p>
+      <p>Patients Ahead: <strong id="patients-ahead">--</strong></p>
+      <p>Estimated Wait: <strong id="est-wait">-- min</strong></p>
+    </div>
+  </div>
+
+  <script src="../shared/api.js"></script>
+  <script src="status.js"></script>
+</body>
+</html>
