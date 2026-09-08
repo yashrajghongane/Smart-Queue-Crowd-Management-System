@@ -89,6 +89,8 @@ class Visit(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
+from sqlalchemy.orm import relationship
+
 class Token(Base):
     __tablename__ = "tokens"
     id = Column(String, primary_key=True, default=generate_uuid)
@@ -103,3 +105,5 @@ class Token(Base):
     completed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    visit = relationship("Visit", backref="tokens")

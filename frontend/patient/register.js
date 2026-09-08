@@ -43,10 +43,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             let msg = err.message;
             try {
                 const parsed = JSON.parse(err.message);
-                msg = parsed.message || parsed.error || msg;
+                const detail = parsed.detail || {};
+                msg = detail.message || detail.error || parsed.message || parsed.error || msg;
                 // Handle duplicate active visit gracefully if backend returns the active token
-                if (parsed.error === 'ACTIVE_VISIT_EXISTS' && parsed.display_token) {
-                    showSuccess(parsed);
+                if (detail.error === 'ACTIVE_VISIT_EXISTS' && detail.display_token) {
+                    showSuccess(detail);
                     return;
                 }
             } catch (e) {}

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart Queue - Dashboard</title>
+  <link rel="stylesheet" href="../shared/styles.css">
+  <style>
+    .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #ccc; padding-bottom: 1rem; margin-bottom: 1rem; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem; }
+    .card { background: white; padding: 1.5rem; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    .card h3 { margin-top: 0; color: #0066cc; }
+    .actions { display: flex; gap: 0.5rem; margin-top: 1rem; flex-wrap: wrap; }
+    .actions button { padding: 0.5rem; font-size: 0.9rem; flex: 1; }
+    .btn-call { background: #28a745; }
+    .btn-complete { background: #17a2b8; }
+    .btn-hold { background: #ffc107; color: #000; }
+  </style>
+</head>
+<body>
+  <div style="max-width: 1200px; margin: 0 auto;">
+    <div class="header">
+      <h2>Staff Dashboard</h2>
+      <div>
+        <span id="user-name">Loading...</span>
+        <button id="logout-btn" style="width: auto; padding: 0.5rem 1rem; margin-left: 1rem; background: #dc3545;">Logout</button>
+      </div>
+    </div>
+
+    <div id="error-message" class="error hidden"></div>
+
+    <div class="grid" id="queue-container">
+      <!-- Cards rendered here -->
+    </div>
+  </div>
+
+  <script src="../shared/api.js"></script>
+  <script src="dashboard.js"></script>
+</body>
+</html>

@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from app.database import get_db
-from app.api.auth import get_current_staff
+from app.api.auth import get_current_staff, RequireRole
 from app.auth_models import Staff
 from app.core import queue
 from app.models import Department, Token, TokenStatus, PriorityType
@@ -23,6 +23,7 @@ def get_queues(db: Session = Depends(get_db), staff: Staff = Depends(get_current
             "name": d.name,
             "waiting_count": waiting_count,
             "current_token": current_token.display_token if current_token else None,
+            "current_token_id": current_token.id if current_token else None,
             "room": "2" # Stubbed for now
         })
     return {"departments": res}
@@ -69,7 +70,7 @@ class PriorityRequest(BaseModel):
     priority: str
 
 @router.post("/token/{token_id}/priority")
-def priority_token(token_id: str, req: PriorityRequest, db: Session = Depends(get_db), staff: Staff = Depends(get_current_staff)):
+def priority_token(token_id: str, req: PriorityRequest, db: Session = Depends(get_db), staff: Staff = Depends(RequireRole(["ADMIN"]))):
     if req.priority not in [PriorityType.NORMAL.value, PriorityType.PRIORITY.value, PriorityType.EMERGENCY.value]:
         raise HTTPException(status_code=400, detail="Invalid priority")
 

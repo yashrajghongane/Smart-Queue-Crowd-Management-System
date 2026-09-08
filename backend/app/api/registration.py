@@ -95,11 +95,12 @@ def register_patient(req: RegisterRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(visit)
 
-    # Transaction safe token generation naive approach for now
-    # Find max token for dept today (simplification: just count total for dept and + 1)
-    # Proper sequence would use a dedicated atomic counter per dept/day
+    # Transaction safe token generation using with_for_update (if supported by DB) or an explicit lock on dept record
+    # For SQLite, it locks the whole DB on write, but for Postgres this is a row-level lock.
+    locked_dept = db.query(Department).filter(Department.id == req.department_id).with_for_update().first()
+
     count = db.query(Token).filter(Token.department_id == req.department_id).count()
-    display_token = f"{dept.code}{count + 101}"
+    display_token = f"{locked_dept.code}{count + 101}"
 
     room = db.query(Room).filter(Room.department_id == req.department_id, Room.active == True).first()
 

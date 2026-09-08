@@ -33,7 +33,8 @@ def login(req: LoginRequest, response: Response, db: Session = Depends(get_db)):
     staff.last_login_at = datetime.utcnow()
     db.commit()
 
-    # Normally use secure/httponly cookies. Here returning token or simple cookie for demo
+    # Secure cookie setup for sessions
+    # Note: 'secure=True' would be added for HTTPS production deployments.
     response.set_cookie(key="session_id", value=session_id, httponly=True, samesite="lax")
 
     return {
@@ -43,6 +44,16 @@ def login(req: LoginRequest, response: Response, db: Session = Depends(get_db)):
             "role": staff.role
         }
     }
+
+class RequireRole:
+    def __init__(self, allowed_roles: list[str]):
+        self.allowed_roles = allowed_roles
+
+    def __call__(self, request: Request, db: Session = Depends(get_db)) -> Staff:
+        staff = get_current_staff(request, db)
+        if staff.role not in self.allowed_roles:
+            raise HTTPException(status_code=403, detail={"error": "FORBIDDEN", "message": "Insufficient permissions"})
+        return staff
 
 def get_current_staff(request: Request, db: Session = Depends(get_db)) -> Staff:
     # Very naive check for demo purposes. Real app uses proper session parsing from cookie

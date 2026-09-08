@@ -1,0 +1,49 @@
+SMART QUEUE & CROWD MANAGEMENT SYSTEM - ENGINEERING AUDIT REPORT
+
+A. VERIFIED CORRECT
+- Backend Foundation (FastAPI, Alembic, SQLite config).
+- SQLAlchemy Models align structurally with PRD goals (departments, visits, tokens, etc).
+- Public APIs (`/api/departments`, `/api/display`) correctly decouple external identifiers.
+- Queue states (WAITING, SERVING, HOLD, SKIPPED, COMPLETED) and core actions correspond to the contract.
+- Hardware occupancy tracking correctly applies the floor bounds (no negative occupancy) and checks for idempotency.
+- Session lookup now correctly avoids O(N) by using direct DB lookup on a fast SHA256 index.
+
+B. INCORRECT
+- /api/register Transaction Safety: Currently relies on naive count querying (`count + 101`). This will race under concurrent registration requests.
+- /api/queue/{id}/next Concurrency: Uses naive `.all()` and in-memory sort without row-level locking (`with_for_update`).
+- Queue engine (`app/core/queue.py`): Missing row locks on state transitions, allowing concurrent overwrites.
+- Auth session cookies: Lacking explicit `Secure` flag logic for production, though `httponly` and `samesite="lax"` are set.
+- /api/register Response shape mismatch: On success, it doesn't wrap the payload identically to the PRD examples.
+- /api/status Estimated Wait calculation: Uses a naive 5 minutes without consulting historical/recent averages (acceptable for MVP, but should note it).
+
+C. INCOMPLETE
+- Frontend completeness: Missing `frontend/staff/login.html`, `frontend/staff/dashboard.html` and associated logic per the build map.
+- Analytics endpoints (`/api/staff/analytics`) do not exist.
+- QR/Admin endpoints (`/api/admin/registration-locations`) do not exist.
+- Occupancy correction endpoint (`/api/staff/zones/{zone_id}/occupancy-correction`) missing.
+
+D. SECURITY RISKS
+- Role Enforcement: `get_current_staff` does not check or authorize specific roles (ADMIN vs STAFF) for protected routes.
+- Anti-bot / Verification flow in `POST /api/register` is completely absent.
+
+E. MISSING TESTS
+- Concurrent registration test (to prove token generation is race-free).
+- Role authorization test (verifying STAFF cannot do ADMIN things).
+- Edge cases on queue state machine (e.g. attempting to recall a COMPLETED token).
+- Wait time logic tests.
+
+F. API/DB CONTRACT MISMATCHES
+- `api/status/{id}` estimated wait missing from the DB consultation timing abstraction.
+- Error format in registration duplicate (400 validation instead of proper `ACTIVE_VISIT_EXISTS` wrapper on the main json structure).
+- Auth `me` endpoint: returned `display_name` instead of `username` on some tests.
+
+G. TECHNICAL DEBT
+- Naive token numbering (needs atomic sequence table or robust lock).
+- Magic numbers in API limits/wait times.
+- Mock location strings (`loc_opaque_id`) hardcoded in `register.js`.
+
+H. RECOMMENDED FIX ORDER
+1. Database Concurrency: Fix transaction safety on `register` (token allocation) and `queue.call_next` (row locking).
+2. API Contract & Security: Implement precise role-based auth decorators (`RequireRole`) and fix error wrapper shapes.
+3. Frontend: Scaffold the missing Staff UI pages (`login.html`, `dashboard.html`).
+4. Test Expansion: Write concurrency and role enforcement tests to lock down the fixes.

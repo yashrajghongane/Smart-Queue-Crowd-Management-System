@@ -1,0 +1,448 @@
+--- backend/app/api/registration.py ---
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from sqlalchemy import or_, and_
+from pydantic import BaseModel, constr
+from typing import Optional, List
+import uuid
+
+from app.database import get_db
+from app.models import Department, Patient, Visit, Token, TokenStatus, Room
+
+router = APIRouter()
+
+class RegisterRequest(BaseModel):
+    registration_location_id: str
+    name: str
+    date_of_birth: Optional[str] = None
+    mobile: str
+    department_id: str
+    patient_type: str
+    verification_token: Optional[str] = None
+    anti_bot_token: Optional[str] = None
+
+class DepartmentResponse(BaseModel):
+    id: str
+    name: str
+    code: str
+    room: Optional[str] = None
+    active: bool
+
+class DepartmentsListResponse(BaseModel):
+    departments: List[DepartmentResponse]
+
+@router.get("/departments", response_model=DepartmentsListResponse)
+def get_departments(db: Session = Depends(get_db)):
+    departments = db.query(Department).filter(Department.active == True).all()
+    res = []
+    for d in departments:
+        # get first active room as default for demo purposes
+        room = db.query(Room).filter(Room.department_id == d.id, Room.active == True).first()
+        res.append(DepartmentResponse(
+            id=d.id,
+            name=d.name,
+            code=d.code,
+            room=room.name_or_number if room else None,
+            active=d.active
+        ))
+    return DepartmentsListResponse(departments=res)
+
+@router.post("/register")
+def register_patient(req: RegisterRequest, db: Session = Depends(get_db)):
+    dept = db.query(Department).filter(Department.id == req.department_id).first()
+    if not dept:
+        raise HTTPException(status_code=400, detail={"error": "VALIDATION_ERROR", "message": "Invalid department"})
+
+    # Check for existing patient or create new
+    patient = db.query(Patient).filter(Patient.mobile == req.mobile).first()
+    if not patient:
+        patient = Patient(
+            full_name=req.name,
+            date_of_birth=req.date_of_birth,
+            mobile=req.mobile,
+            patient_type_default=req.patient_type
+        )
+        db.add(patient)
+        db.commit()
+        db.refresh(patient)
+
+    # Check duplicate active visit (WAITING, SERVING, HOLD)
+    active_statuses = [TokenStatus.WAITING.value, TokenStatus.SERVING.value, TokenStatus.HOLD.value]
+
+    existing_token = db.query(Token).join(Visit).filter(
+        Visit.patient_id == patient.id,
+        Visit.department_id == req.department_id,
+        Token.status.in_(active_statuses)
+    ).first()
+
+    if existing_token:
+        # Return existing active visit state, preventing duplicate
+        room = db.query(Room).filter(Room.id == existing_token.room_id).first() if existing_token.room_id else None
+        # Must return specific structure for active visit exists
+        raise HTTPException(status_code=400, detail={
+            "error": "ACTIVE_VISIT_EXISTS",
+            "message": "Patient already has an active visit for this department.",
+            "visit_id": existing_token.visit_id,
+            "display_token": existing_token.display_token,
+            "status": existing_token.status,
+            "status_url": f"/status/{existing_token.status_access_id}",
+            "department": dept.name,
+            "room": room.name_or_number if room else None
+        })
+
+    # Create new visit and token atomically
+    visit = Visit(patient_id=patient.id, department_id=req.department_id)
+    db.add(visit)
+    db.commit()
+    db.refresh(visit)
+
+    # Transaction safe token generation naive approach for now
+    # Find max token for dept today (simplification: just count total for dept and + 1)
+    # Proper sequence would use a dedicated atomic counter per dept/day
+    count = db.query(Token).filter(Token.department_id == req.department_id).count()
+    display_token = f"{dept.code}{count + 101}"
+
+    room = db.query(Room).filter(Room.department_id == req.department_id, Room.active == True).first()
+
+    status_id = str(uuid.uuid4())
+    token = Token(
+        visit_id=visit.id,
+        department_id=req.department_id,
+        display_token=display_token,
+        status=TokenStatus.WAITING.value,
+        room_id=room.id if room else None,
+        status_access_id=status_id
+    )
+    db.add(token)
+    db.commit()
+    db.refresh(token)
+
+    return {
+        "visit_id": visit.id,
+        "token_id": token.id,
+        "display_token": token.display_token,
+        "department": dept.name,
+        "room": room.name_or_number if room else None,
+        "status": token.status,
+        "status_url": f"/status/{token.status_access_id}"
+    }
+--- backend/app/core/queue.py ---
+from sqlalchemy.orm import Session
+from sqlalchemy import or_, and_, asc
+from fastapi import HTTPException
+from datetime import datetime
+import json
+
+from app.models import Token, TokenStatus, PriorityType, Visit, Department, Room
+from app.auth_models import QueueEvent
+
+def _record_event(db: Session, token: Token, action: str, from_status: str, to_status: str, actor_id: str, actor_type: str = "STAFF"):
+    evt = QueueEvent(
+        token_id=token.id,
+        visit_id=token.visit_id,
+        actor_type=actor_type,
+        actor_id=actor_id,
+        action=action,
+        from_status=from_status,
+        to_status=to_status,
+    )
+    db.add(evt)
+
+def call_next(db: Session, department_id: str, actor_id: str, room_id: str = None) -> Token:
+    # Find next eligible token (WAITING or HOLD)
+    # Order by EMERGENCY -> PRIORITY -> NORMAL, then by created_at (FIFO)
+
+    # Python map enum to priority sort order
+    priority_order = {
+        PriorityType.EMERGENCY.value: 1,
+        PriorityType.PRIORITY.value: 2,
+        PriorityType.NORMAL.value: 3
+    }
+
+    eligible = db.query(Token).filter(
+        Token.department_id == department_id,
+        Token.status.in_([TokenStatus.WAITING.value, TokenStatus.HOLD.value])
+    ).all()
+
+    if not eligible:
+        raise HTTPException(status_code=400, detail={"error": "QUEUE_EMPTY", "message": "No tokens waiting."})
+
+    # Sort in-memory for simpler logic, or construct complex SQL case statement.
+    # For small queues, in-memory is fine.
+    eligible.sort(key=lambda t: (priority_order.get(t.priority, 3), t.created_at))
+    next_token = eligible[0]
+
+    from_status = next_token.status
+    next_token.status = TokenStatus.SERVING.value
+    next_token.called_at = datetime.utcnow()
+    if room_id:
+        next_token.room_id = room_id
+
+    _record_event(db, next_token, "CALL_NEXT", from_status, next_token.status, actor_id)
+
+    db.commit()
+    db.refresh(next_token)
+    return next_token
+
+def transition_token(db: Session, token_id: str, action: str, target_status: str, actor_id: str) -> Token:
+    token = db.query(Token).filter(Token.id == token_id).first()
+    if not token:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "Token not found"})
+
+    from_status = token.status
+    if from_status == TokenStatus.COMPLETED.value or from_status == TokenStatus.SKIPPED.value:
+        raise HTTPException(status_code=400, detail={"error": "INVALID_STATE_TRANSITION", "message": "Token is already in terminal state"})
+
+    token.status = target_status
+    if target_status == TokenStatus.COMPLETED.value:
+        token.completed_at = datetime.utcnow()
+
+    _record_event(db, token, action, from_status, target_status, actor_id)
+    db.commit()
+    db.refresh(token)
+    return token
+
+def transfer_token(db: Session, token_id: str, target_department_id: str, actor_id: str) -> dict:
+    token = db.query(Token).filter(Token.id == token_id).first()
+    if not token:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    target_dept = db.query(Department).filter(Department.id == target_department_id).first()
+    if not target_dept:
+        raise HTTPException(status_code=400, detail="Invalid target department")
+
+    # Mark old as transferred/completed
+    from_status = token.status
+    token.status = TokenStatus.COMPLETED.value
+    _record_event(db, token, "TRANSFER", from_status, token.status, actor_id, metadata_json=json.dumps({"target_dept": target_dept.name}))
+
+    # Create new visit/token
+    new_visit = Visit(patient_id=token.visit.patient_id, department_id=target_department_id)
+    db.add(new_visit)
+    db.commit()
+    db.refresh(new_visit)
+
+    count = db.query(Token).filter(Token.department_id == target_department_id).count()
+    new_display_token = f"{target_dept.code}{count + 101}"
+
+    room = db.query(Room).filter(Room.department_id == target_department_id, Room.active == True).first()
+
+    import uuid
+    new_token = Token(
+        visit_id=new_visit.id,
+        department_id=target_department_id,
+        display_token=new_display_token,
+        status=TokenStatus.WAITING.value,
+        room_id=room.id if room else None,
+        status_access_id=str(uuid.uuid4())
+    )
+    db.add(new_token)
+    db.commit()
+    db.refresh(new_token)
+
+    _record_event(db, new_token, "TRANSFERRED_IN", "NONE", new_token.status, actor_id, metadata_json=json.dumps({"source_token": token.display_token}))
+    db.commit()
+
+    return {
+        "source_token": token.display_token,
+        "target_token": new_token.display_token,
+        "target_department": target_dept.name,
+        "status": new_token.status
+    }
+
+--- backend/app/api/auth.py ---
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+import uuid
+from datetime import datetime, timedelta
+
+from app.database import get_db
+from app.auth_models import Staff, StaffSession, pwd_context
+
+router = APIRouter()
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+@router.post("/login")
+def login(req: LoginRequest, response: Response, db: Session = Depends(get_db)):
+    staff = db.query(Staff).filter(Staff.username == req.username).first()
+    if not staff or not pwd_context.verify(req.password, staff.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    import hashlib
+    # Create session
+    session_id = str(uuid.uuid4())
+    session_hash = hashlib.sha256(session_id.encode()).hexdigest()
+
+    staff_session = StaffSession(
+        staff_id=staff.id,
+        session_identifier_hash=session_hash,
+        expires_at=datetime.utcnow() + timedelta(hours=12)
+    )
+    db.add(staff_session)
+    staff.last_login_at = datetime.utcnow()
+    db.commit()
+
+    # Normally use secure/httponly cookies. Here returning token or simple cookie for demo
+    response.set_cookie(key="session_id", value=session_id, httponly=True, samesite="lax")
+
+    return {
+        "staff": {
+            "id": staff.id,
+            "display_name": staff.display_name,
+            "role": staff.role
+        }
+    }
+
+def get_current_staff(request: Request, db: Session = Depends(get_db)) -> Staff:
+    # Very naive check for demo purposes. Real app uses proper session parsing from cookie
+    session_id = request.cookies.get("session_id")
+    if not session_id:
+        # Check header just in case for test client
+        session_id = request.headers.get("x-session-id")
+        if not session_id:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    import hashlib
+    session_hash = hashlib.sha256(session_id.encode()).hexdigest()
+    valid_session = db.query(StaffSession).filter(
+        StaffSession.session_identifier_hash == session_hash,
+        StaffSession.expires_at > datetime.utcnow(),
+        StaffSession.revoked_at == None
+    ).first()
+
+    if not valid_session:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    staff = db.query(Staff).filter(Staff.id == valid_session.staff_id).first()
+    return staff
+
+@router.post("/logout")
+def logout(response: Response):
+    response.delete_cookie("session_id")
+    return {"status": "ok"}
+
+@router.get("/me")
+def me(staff: Staff = Depends(get_current_staff)):
+    return {
+        "staff": {
+            "id": staff.id,
+            "display_name": staff.display_name,
+            "role": staff.role
+        }
+    }
+
+--- backend/app/api/staff.py ---
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from pydantic import BaseModel
+
+from app.database import get_db
+from app.api.auth import get_current_staff
+from app.auth_models import Staff
+from app.core import queue
+from app.models import Department, Token, TokenStatus, PriorityType
+
+router = APIRouter()
+
+@router.get("/queues")
+def get_queues(db: Session = Depends(get_db), staff: Staff = Depends(get_current_staff)):
+    departments = db.query(Department).filter(Department.active == True).all()
+    res = []
+    for d in departments:
+        waiting_count = db.query(Token).filter(Token.department_id == d.id, Token.status == TokenStatus.WAITING.value).count()
+        current_token = db.query(Token).filter(Token.department_id == d.id, Token.status == TokenStatus.SERVING.value).order_by(Token.called_at.desc()).first()
+
+        res.append({
+            "department_id": d.id,
+            "name": d.name,
+            "waiting_count": waiting_count,
+            "current_token": current_token.display_token if current_token else None,
+            "room": "2" # Stubbed for now
+        })
+    return {"departments": res}
+
+@router.post("/queue/{department_id}/next")
+def call_next(department_id: str, db: Session = Depends(get_db), staff: Staff = Depends(get_current_staff)):
+    token = queue.call_next(db, department_id, staff.id)
+    return {
+        "token_id": token.id,
+        "display_token": token.display_token,
+        "status": token.status,
+        "room": "2" # Stubbed
+    }
+
+@router.post("/token/{token_id}/hold")
+def hold_token(token_id: str, db: Session = Depends(get_db), staff: Staff = Depends(get_current_staff)):
+    token = queue.transition_token(db, token_id, "HOLD", TokenStatus.HOLD.value, staff.id)
+    return {"token_id": token.id, "display_token": token.display_token, "status": token.status}
+
+@router.post("/token/{token_id}/recall")
+def recall_token(token_id: str, db: Session = Depends(get_db), staff: Staff = Depends(get_current_staff)):
+    # Same as WAITING but records RECALL
+    token = queue.transition_token(db, token_id, "RECALL", TokenStatus.WAITING.value, staff.id)
+    return {"token_id": token.id, "display_token": token.display_token, "status": token.status}
+
+@router.post("/token/{token_id}/skip")
+def skip_token(token_id: str, db: Session = Depends(get_db), staff: Staff = Depends(get_current_staff)):
+    token = queue.transition_token(db, token_id, "SKIP", TokenStatus.SKIPPED.value, staff.id)
+    return {"token_id": token.id, "display_token": token.display_token, "status": token.status}
+
+@router.post("/token/{token_id}/complete")
+def complete_token(token_id: str, db: Session = Depends(get_db), staff: Staff = Depends(get_current_staff)):
+    token = queue.transition_token(db, token_id, "COMPLETE", TokenStatus.COMPLETED.value, staff.id)
+    return {"token_id": token.id, "display_token": token.display_token, "status": token.status}
+
+class TransferRequest(BaseModel):
+    target_department_id: str
+
+@router.post("/token/{token_id}/transfer")
+def transfer_token(token_id: str, req: TransferRequest, db: Session = Depends(get_db), staff: Staff = Depends(get_current_staff)):
+    return queue.transfer_token(db, token_id, req.target_department_id, staff.id)
+
+class PriorityRequest(BaseModel):
+    priority: str
+
+@router.post("/token/{token_id}/priority")
+def priority_token(token_id: str, req: PriorityRequest, db: Session = Depends(get_db), staff: Staff = Depends(get_current_staff)):
+    if req.priority not in [PriorityType.NORMAL.value, PriorityType.PRIORITY.value, PriorityType.EMERGENCY.value]:
+        raise HTTPException(status_code=400, detail="Invalid priority")
+
+    token = db.query(Token).filter(Token.id == token_id).first()
+    if not token:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    token.priority = req.priority
+    db.commit()
+    return {"token_id": token.id, "display_token": token.display_token, "priority": token.priority}
+
+--- backend/app/server.py ---
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI(title="Smart Queue System")
+
+# Minimal CORS setup
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Adjust for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+from app.api import registration, auth, staff, status, display, occupancy
+
+app.include_router(registration.router, prefix="/api")
+app.include_router(auth.router, prefix="/api/auth")
+app.include_router(staff.router, prefix="/api/staff")
+app.include_router(status.router, prefix="/api/status")
+app.include_router(display.router, prefix="/api/display")
+app.include_router(occupancy.router, prefix="/api")
+
+@app.get("/api/health")
+def health_check():
+    return {"status": "ok"}

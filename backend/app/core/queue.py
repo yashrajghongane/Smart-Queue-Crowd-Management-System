@@ -30,6 +30,11 @@ def call_next(db: Session, department_id: str, actor_id: str, room_id: str = Non
         PriorityType.NORMAL.value: 3
     }
 
+    # Explicit lock to prevent race conditions during call_next
+    locked_dept = db.query(Department).filter(Department.id == department_id).with_for_update().first()
+    if not locked_dept:
+        raise HTTPException(status_code=400, detail={"error": "VALIDATION_ERROR", "message": "Department not found"})
+
     eligible = db.query(Token).filter(
         Token.department_id == department_id,
         Token.status.in_([TokenStatus.WAITING.value, TokenStatus.HOLD.value])
@@ -41,7 +46,10 @@ def call_next(db: Session, department_id: str, actor_id: str, room_id: str = Non
     # Sort in-memory for simpler logic, or construct complex SQL case statement.
     # For small queues, in-memory is fine.
     eligible.sort(key=lambda t: (priority_order.get(t.priority, 3), t.created_at))
-    next_token = eligible[0]
+    next_token_id = eligible[0].id
+
+    # Re-fetch the specific token with a write lock to ensure no one else took it
+    next_token = db.query(Token).filter(Token.id == next_token_id).with_for_update().first()
 
     from_status = next_token.status
     next_token.status = TokenStatus.SERVING.value
@@ -56,7 +64,7 @@ def call_next(db: Session, department_id: str, actor_id: str, room_id: str = Non
     return next_token
 
 def transition_token(db: Session, token_id: str, action: str, target_status: str, actor_id: str) -> Token:
-    token = db.query(Token).filter(Token.id == token_id).first()
+    token = db.query(Token).filter(Token.id == token_id).with_for_update().first()
     if not token:
         raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "Token not found"})
 
@@ -93,8 +101,9 @@ def transfer_token(db: Session, token_id: str, target_department_id: str, actor_
     db.commit()
     db.refresh(new_visit)
 
+    locked_target_dept = db.query(Department).filter(Department.id == target_department_id).with_for_update().first()
     count = db.query(Token).filter(Token.department_id == target_department_id).count()
-    new_display_token = f"{target_dept.code}{count + 101}"
+    new_display_token = f"{locked_target_dept.code}{count + 101}"
 
     room = db.query(Room).filter(Room.department_id == target_department_id, Room.active == True).first()
 
