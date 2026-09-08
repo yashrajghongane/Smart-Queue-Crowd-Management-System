@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+sqlalchemy
+alembic
+pytest
+passlib
+python-jose
+pytest-asyncio
+httpx
